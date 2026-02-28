@@ -1821,17 +1821,26 @@ export const processTemplateVariables = (state: ICommonObject, finalOutput: any)
     const newState = { ...state }
 
     for (const key in newState) {
-        const stateValue = newState[key].toString()
-        if (stateValue.includes('{{ output') || stateValue.includes('{{output')) {
-            // Handle simple output replacement (with or without spaces)
-            if (stateValue === '{{ output }}' || stateValue === '{{output}}') {
+        // Strip HTML tags from Tiptap-encoded state values before processing
+        let stateValue = newState[key].toString()
+        if (stateValue.includes('<') && stateValue.includes('>')) {
+            stateValue = stateValue.replace(/<[^>]*>/g, '').trim()
+            newState[key] = stateValue
+        }
+
+        // Match both {{ output }} (legacy) and {{ $node.output }} (Tiptap variable format)
+        if (stateValue.includes('{{ output') || stateValue.includes('{{output') ||
+            stateValue.includes('{{ $node.output') || stateValue.includes('{{$node.output')) {
+            // Handle simple output replacement (with or without spaces, with or without $node. prefix)
+            if (stateValue === '{{ output }}' || stateValue === '{{output}}' ||
+                stateValue === '{{ $node.output }}' || stateValue === '{{$node.output}}') {
                 newState[key] = finalOutput
                 continue
             }
 
-            // Handle JSON path expressions like {{ output.updated }} or {{output.updated}}
+            // Handle JSON path expressions like {{ output.updated }} or {{ $node.output.updated }}
             // eslint-disable-next-line
-            const match = stateValue.match(/\{\{\s*output\.([\w\.]+)\s*\}\}/)
+            const match = stateValue.match(/\{\{\s*(?:\$node\.)?output\.([\w\.]+)\s*\}\}/)
             if (match) {
                 try {
                     // Parse the response if it's JSON
@@ -1845,8 +1854,12 @@ export const processTemplateVariables = (state: ICommonObject, finalOutput: any)
                     newState[key] = stateValue
                 }
             } else {
-                // Handle simple {{ output }} replacement for backward compatibility
-                newState[key] = newState[key].replaceAll('{{ output }}', finalOutput)
+                // Handle simple replacement for backward compatibility
+                newState[key] = stateValue
+                    .replaceAll('{{ output }}', finalOutput)
+                    .replaceAll('{{output}}', finalOutput)
+                    .replaceAll('{{ $node.output }}', finalOutput)
+                    .replaceAll('{{$node.output}}', finalOutput)
             }
         }
     }

@@ -209,6 +209,7 @@ const Canvas = () => {
     }
 
     const handleSaveFlow = async (chatflowName) => {
+        if (chatflow?.isLocked) return
         if (reactFlowInstance) {
             const nodes = reactFlowInstance.getNodes().map((node) => {
                 const nodeData = cloneDeep(node.data)
@@ -589,15 +590,18 @@ const Canvas = () => {
                                 onNodesChange={onNodesChange}
                                 onNodeClick={onNodeClick}
                                 onEdgesChange={onEdgesChange}
-                                onDrop={onDrop}
-                                onDragOver={onDragOver}
-                                onNodeDragStop={setDirty}
+                                onDrop={chatflow?.isLocked ? undefined : onDrop}
+                                onDragOver={chatflow?.isLocked ? undefined : onDragOver}
+                                onNodeDragStop={chatflow?.isLocked ? undefined : setDirty}
                                 nodeTypes={nodeTypes}
                                 edgeTypes={edgeTypes}
-                                onConnect={onConnect}
+                                onConnect={chatflow?.isLocked ? undefined : onConnect}
                                 onInit={setReactFlowInstance}
                                 fitView
-                                deleteKeyCode={canvas.canvasDialogShow ? null : ['Delete']}
+                                deleteKeyCode={canvas.canvasDialogShow || chatflow?.isLocked ? null : ['Delete']}
+                                nodesDraggable={!chatflow?.isLocked}
+                                nodesConnectable={!chatflow?.isLocked}
+                                elementsSelectable={!chatflow?.isLocked}
                                 minZoom={0.1}
                                 snapGrid={[25, 25]}
                                 snapToGrid={isSnappingEnabled}

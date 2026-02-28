@@ -8,7 +8,7 @@ import { useTheme } from '@mui/material/styles'
 import { Avatar, Box, ButtonBase, Typography, Stack, TextField, Button } from '@mui/material'
 
 // icons
-import { IconSettings, IconChevronLeft, IconDeviceFloppy, IconPencil, IconCheck, IconX, IconCode } from '@tabler/icons-react'
+import { IconSettings, IconChevronLeft, IconDeviceFloppy, IconPencil, IconCheck, IconX, IconCode, IconLock, IconLockOpen } from '@tabler/icons-react'
 
 // project imports
 import Settings from '@/views/settings'
@@ -214,8 +214,25 @@ const CanvasHeader = ({ chatflow, isAgentCanvas, isAgentflowV2, handleSaveFlow, 
     }
 
     const onSaveChatflowClick = () => {
+        if (chatflow?.isLocked) return
         if (chatflow.id) handleSaveFlow(flowName)
         else setFlowDialogOpen(true)
+    }
+
+    const onToggleLock = async () => {
+        if (!chatflow?.id) return
+        const newLocked = !chatflow.isLocked
+        try {
+            const saveResp = await chatflowsApi.updateChatflow(chatflow.id, { isLocked: newLocked })
+            if (saveResp.data) {
+                dispatch({ type: SET_CHATFLOW, chatflow: saveResp.data })
+            }
+        } catch (error) {
+            enqueueSnackbar({
+                message: `Failed to ${newLocked ? 'lock' : 'unlock'} flow`,
+                options: { variant: 'error', persist: false, action: (key) => <Button style={{ color: 'white' }} onClick={() => closeSnackbar(key)}>Dismiss</Button> }
+            })
+        }
     }
 
     const onConfirmSaveName = (flowName) => {
@@ -410,19 +427,50 @@ const CanvasHeader = ({ chatflow, isAgentCanvas, isAgentflowV2, handleSaveFlow, 
                             </Avatar>
                         </ButtonBase>
                     )}
+                    {chatflow?.id && (
+                        <Available permission={isAgentCanvas ? 'agentflows:update' : 'chatflows:update'}>
+                            <ButtonBase
+                                title={chatflow?.isLocked ? 'Unlock flow' : 'Lock flow'}
+                                sx={{ borderRadius: '50%', mr: 2 }}
+                                onClick={onToggleLock}
+                            >
+                                <Avatar
+                                    variant='rounded'
+                                    sx={{
+                                        ...theme.typography.commonAvatar,
+                                        ...theme.typography.mediumAvatar,
+                                        transition: 'all .2s ease-in-out',
+                                        background: chatflow?.isLocked ? theme.palette.error.light : theme.palette.canvasHeader.deployLight,
+                                        color: chatflow?.isLocked ? theme.palette.error.dark : theme.palette.canvasHeader.deployDark,
+                                        '&:hover': {
+                                            background: chatflow?.isLocked ? theme.palette.error.dark : theme.palette.canvasHeader.deployDark,
+                                            color: theme.palette.canvasHeader.deployLight
+                                        }
+                                    }}
+                                    color='inherit'
+                                >
+                                    {chatflow?.isLocked ? <IconLock stroke={1.5} size='1.3rem' /> : <IconLockOpen stroke={1.5} size='1.3rem' />}
+                                </Avatar>
+                            </ButtonBase>
+                        </Available>
+                    )}
                     <Available permission={savePermission}>
-                        <ButtonBase title={`Save ${title}`} sx={{ borderRadius: '50%', mr: 2 }}>
+                        <ButtonBase
+                            title={chatflow?.isLocked ? 'Flow is locked' : `Save ${title}`}
+                            sx={{ borderRadius: '50%', mr: 2 }}
+                            disabled={!!chatflow?.isLocked}
+                        >
                             <Avatar
                                 variant='rounded'
                                 sx={{
                                     ...theme.typography.commonAvatar,
                                     ...theme.typography.mediumAvatar,
                                     transition: 'all .2s ease-in-out',
-                                    background: theme.palette.canvasHeader.saveLight,
-                                    color: theme.palette.canvasHeader.saveDark,
+                                    background: chatflow?.isLocked ? theme.palette.action.disabledBackground : theme.palette.canvasHeader.saveLight,
+                                    color: chatflow?.isLocked ? theme.palette.action.disabled : theme.palette.canvasHeader.saveDark,
                                     '&:hover': {
-                                        background: theme.palette.canvasHeader.saveDark,
-                                        color: theme.palette.canvasHeader.saveLight
+                                        background: chatflow?.isLocked ? theme.palette.action.disabledBackground : theme.palette.canvasHeader.saveDark,
+                                        color: chatflow?.isLocked ? theme.palette.action.disabled : theme.palette.canvasHeader.saveLight
                                     }
                                 }}
                                 color='inherit'

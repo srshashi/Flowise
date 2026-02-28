@@ -184,6 +184,13 @@ const updateChatflow = async (req: Request, res: Response, next: NextFunction) =
         if (!chatflow) {
             return res.status(404).send('Chatflow not found')
         }
+        const body = req.body
+        if (chatflow.isLocked && !('isLocked' in body)) {
+            throw new InternalFlowiseError(
+                StatusCodes.FORBIDDEN,
+                `Error: chatflowsController.updateChatflow - flow is locked and cannot be edited!`
+            )
+        }
         const orgId = req.user?.activeOrganizationId
         if (!orgId) {
             throw new InternalFlowiseError(
@@ -192,7 +199,6 @@ const updateChatflow = async (req: Request, res: Response, next: NextFunction) =
             )
         }
         const subscriptionId = req.user?.activeOrganizationSubscriptionId || ''
-        const body = req.body
         const updateChatFlow = new ChatFlow()
         Object.assign(updateChatFlow, body)
 

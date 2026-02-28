@@ -27,6 +27,9 @@ export class ChatFlow implements IChatFlow {
     isPublic?: boolean
 
     @Column({ nullable: true })
+    isLocked?: boolean
+
+    @Column({ nullable: true })
     apikeyid?: string
 
     @Column({ nullable: true, type: 'text' })

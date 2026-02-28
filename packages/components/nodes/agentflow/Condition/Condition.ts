@@ -13,6 +13,16 @@ const unescapeRegexPattern = (escaped: string): string => {
         .replace(/\0/g, '\\') // Restore preserved backslashes
 }
 
+const normalizeNumberInput = (value: CommonType): number => {
+    if (typeof value === 'number') return value
+    if (typeof value === 'boolean') return Number(value)
+    if (value === undefined || value === null) return 0
+
+    const plainText = removeMarkdown(String(value)).replace(/<[^>]*>/g, '').trim()
+    const parsed = parseFloat(plainText)
+    return Number.isNaN(parsed) ? 0 : parsed
+}
+
 class Condition_Agentflow implements INode {
     label: string
     name: string
@@ -317,8 +327,8 @@ class Condition_Agentflow implements INode {
                     value2 = _value2
                     break
                 case 'number':
-                    value1 = parseFloat(_value1 as string) || 0
-                    value2 = parseFloat(_value2 as string) || 0
+                    value1 = normalizeNumberInput(_value1)
+                    value2 = normalizeNumberInput(_value2)
                     break
                 default: // string
                     value1 = removeMarkdown((_value1 as string) || '')

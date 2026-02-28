@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, forwardRef } from 'react'
+import { useEffect, useState, useCallback, forwardRef, useRef } from 'react'
 import PropTypes from 'prop-types'
 import moment from 'moment'
 import { useSelector, useDispatch } from 'react-redux'
@@ -45,6 +45,7 @@ import { enqueueSnackbar as enqueueSnackbarAction, closeSnackbar as closeSnackba
 
 // API
 import executionsApi from '@/api/executions'
+import chatmessageApi from '@/api/chatmessage'
 
 // Hooks
 import useApi from '@/hooks/useApi'
@@ -301,8 +302,11 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
     const theme = useTheme()
     const customization = useSelector((state) => state.customization)
     const updateExecutionApi = useApi(executionsApi.updateExecution)
+    const abortExecutionApi = useApi(chatmessageApi.abortMessage)
 
     const dispatch = useDispatch()
+    const drawerPollRef = useRef(null)
+    const userSelectedIdRef = useRef(null) // tracks explicit user selection, not programmatic
 
     // useEffect to initialize localMetadata when metadata changes
     useEffect(() => {
@@ -310,6 +314,37 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
             setLocalMetadata(metadata)
         }
     }, [metadata])
+
+    // Clear user selection when drawer closes so next open starts fresh
+    useEffect(() => {
+        if (!open) {
+            userSelectedIdRef.current = null
+        }
+    }, [open])
+
+    // Auto-poll while drawer is open and execution is INPROGRESS
+    useEffect(() => {
+        const isInProgress = open && localMetadata?.state === 'INPROGRESS' && localMetadata?.id
+        if (isInProgress) {
+            if (!drawerPollRef.current) {
+                drawerPollRef.current = setInterval(() => {
+                    onRefresh(localMetadata.id)
+                }, 3000)
+            }
+        } else {
+            if (drawerPollRef.current) {
+                clearInterval(drawerPollRef.current)
+                drawerPollRef.current = null
+            }
+        }
+        return () => {
+            if (drawerPollRef.current) {
+                clearInterval(drawerPollRef.current)
+                drawerPollRef.current = null
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, localMetadata?.state, localMetadata?.id])
 
     const copyToClipboard = () => {
         navigator.clipboard.writeText(localMetadata?.id)
@@ -666,6 +701,17 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
         if (execution) {
             const newTree = buildTreeData(execution)
 
+            const findNodeById = (nodes, id) => {
+                for (const node of nodes) {
+                    if (node.id === id) return node
+                    if (node.children) {
+                        const found = findNodeById(node.children, id)
+                        if (found) return found
+                    }
+                }
+                return null
+            }
+
             // Find first stopped item if metadata state is STOPPED
             if (metadata?.state === 'STOPPED') {
                 const findFirstStoppedNode = (nodes) => {
@@ -685,14 +731,21 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
                     setSelectedItem(stoppedNode)
                 } else {
                     setExpandedItems(getAllNodeIds(newTree))
-                    // Set the first item as default selected item
                     if (newTree.length > 0) {
                         setSelectedItem(newTree[0])
                     }
                 }
+            } else if (metadata?.state === 'INPROGRESS' && userSelectedIdRef.current) {
+                // Preserve the user's explicit selection across polling refreshes
+                setExpandedItems(getAllNodeIds(newTree))
+                const preserved = findNodeById(newTree, userSelectedIdRef.current)
+                if (preserved) {
+                    setSelectedItem(preserved)
+                } else if (newTree.length > 0) {
+                    setSelectedItem(newTree[0])
+                }
             } else {
                 setExpandedItems(getAllNodeIds(newTree))
-                // Set the first item as default selected item
                 if (newTree.length > 0) {
                     setSelectedItem(newTree[0])
                 }
@@ -714,6 +767,7 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
             return null
         }
         const selectedNode = findNode(executionTree, itemId)
+        userSelectedIdRef.current = itemId
         setSelectedItem(selectedNode)
     }
 
@@ -807,6 +861,25 @@ export const ExecutionDetails = ({ open, isPublic, execution, metadata, onClose,
                             <Typography sx={{ flex: 1, mt: 1 }} color='text.primary'>
                                 {metadata?.updatedDate ? moment(metadata.updatedDate).format('MMM D, YYYY h:mm A') : 'N/A'}
                             </Typography>
+                            {localMetadata?.state === 'INPROGRESS' && (
+                                <IconButton
+                                    onClick={() => {
+                                        abortExecutionApi.request(localMetadata.agentflowId, localMetadata.sessionId)
+                                        setTimeout(() => onRefresh(localMetadata?.id), 1000)
+                                    }}
+                                    size='small'
+                                    disabled={abortExecutionApi.loading}
+                                    sx={{
+                                        color: theme.palette.error.main,
+                                        '&:hover': {
+                                            backgroundColor: theme.palette.error.main + '20'
+                                        }
+                                    }}
+                                    title='Stop execution'
+                                >
+                                    <StopCircleIcon fontSize='small' />
+                                </IconButton>
+                            )}
                             <IconButton
                                 onClick={() => onRefresh(localMetadata?.id)}
                                 size='small'

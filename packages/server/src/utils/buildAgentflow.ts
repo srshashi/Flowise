@@ -2018,7 +2018,12 @@ export const executeAgentFlow = async ({
                 status: 'FINISHED'
             })
 
-            if (!isRecursive) sseStreamer?.streamAgentFlowExecutedDataEvent(chatId, agentFlowExecutedData)
+            if (!isRecursive) {
+                sseStreamer?.streamAgentFlowExecutedDataEvent(chatId, agentFlowExecutedData)
+                await updateExecution(appDataSource, newExecution.id, workspaceId, {
+                    executionData: JSON.stringify(agentFlowExecutedData)
+                })
+            }
 
             // Add to agentflow runtime state
             if (nodeResult && nodeResult.state) {

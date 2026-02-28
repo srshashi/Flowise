@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import DatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
 
@@ -193,6 +193,31 @@ const AgentExecutions = () => {
     useEffect(() => {
         setLoading(getAllExecutions.loading)
     }, [getAllExecutions.loading])
+
+    const pollIntervalRef = useRef(null)
+
+    useEffect(() => {
+        const hasInProgress = executions.some((e) => e.state === 'INPROGRESS')
+        if (hasInProgress) {
+            if (!pollIntervalRef.current) {
+                pollIntervalRef.current = setInterval(() => {
+                    getAllExecutions.request({ page: currentPage, limit: pageLimit })
+                }, 3000)
+            }
+        } else {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current)
+                pollIntervalRef.current = null
+            }
+        }
+        return () => {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current)
+                pollIntervalRef.current = null
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [executions])
 
     useEffect(() => {
         setError(getAllExecutions.error)

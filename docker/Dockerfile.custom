@@ -1,0 +1,41 @@
+# ── Stage 1: Build ──────────────────────────────────────────────────────────
+FROM node:20-alpine AS build
+
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
+RUN npm install -g pnpm turbo
+
+WORKDIR /app
+
+# Copy manifests first for better layer caching
+COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json turbo.json ./
+COPY packages/server/package.json        ./packages/server/
+COPY packages/ui/package.json            ./packages/ui/
+COPY packages/components/package.json    ./packages/components/
+COPY packages/agentflow/package.json     ./packages/agentflow/
+COPY packages/api-documentation/package.json ./packages/api-documentation/
+
+RUN pnpm install --frozen-lockfile
+
+COPY packages ./packages
+
+RUN pnpm build
+
+# ── Stage 2: Runtime ────────────────────────────────────────────────────────
+FROM node:20-alpine
+
+RUN apk add --no-cache chromium git python3 py3-pip make g++ build-base cairo-dev pango-dev curl
+
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV NODE_OPTIONS=--max-old-space-size=2048
+
+WORKDIR /app
+
+COPY --from=build /app/node_modules          ./node_modules
+COPY --from=build /app/packages/server       ./packages/server
+COPY --from=build /app/packages/ui/build     ./packages/ui/build
+COPY --from=build /app/packages/components   ./packages/components
+COPY --from=build /app/packages/agentflow    ./packages/agentflow
+
+ENTRYPOINT ["node", "/app/packages/server/bin/run", "start"]

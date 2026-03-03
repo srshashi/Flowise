@@ -7,6 +7,27 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { checkDenyList, secureFetch } from '../../../src/httpSecurity'
 
+const formatMCPToolContent = (content: any): string => {
+    if (!Array.isArray(content)) {
+        return JSON.stringify(content)
+    }
+
+    const textItems = content
+        .map((item: any) => {
+            if ((item?.text && !item?.type) || item?.type === 'text') {
+                return item.text || ''
+            }
+            return ''
+        })
+        .filter((text: string) => text)
+
+    if (textItems.length > 0) {
+        return textItems.join('\n')
+    }
+
+    return JSON.stringify(content)
+}
+
 export class MCPToolkit extends BaseToolkit {
     tools: Tool[] = []
     _tools: ListToolsResult | null = null
@@ -153,9 +174,7 @@ export async function MCPTool({
             try {
                 const req: CallToolRequest = { method: 'tools/call', params: { name: name, arguments: input as any } }
                 const res = await client.request(req, CallToolResultSchema)
-                const content = res.content
-                const contentString = JSON.stringify(content)
-                return contentString
+                return formatMCPToolContent(res.content)
             } finally {
                 // Always close the client after the request completes
                 await client.close()

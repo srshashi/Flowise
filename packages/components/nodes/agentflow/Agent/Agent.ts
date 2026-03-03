@@ -95,6 +95,96 @@ const sanitizeToolName = (name: string): string => {
     return sanitized.slice(0, 64)
 }
 
+const normalizeForStableStringify = (value: any): any => {
+    if (Array.isArray(value)) {
+        return value.map((item) => normalizeForStableStringify(item))
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.keys(value)
+            .sort()
+            .reduce((acc: Record<string, any>, key) => {
+                acc[key] = normalizeForStableStringify(value[key])
+                return acc
+            }, {})
+    }
+
+    return value
+}
+
+const stableStringify = (obj: any): string => JSON.stringify(normalizeForStableStringify(obj))
+
+const DUPLICATE_TOOL_RECOVERY_PROMPT =
+    process.env.FLOWISE_DUPLICATE_TOOL_RECOVERY_PROMPT ||
+    'You already used the relevant tool with the same arguments in this user turn. Do not call any tool again. Write a concise natural-language answer to the user based on the tool results provided. Do not copy raw JSON — transform it into plain sentences.'
+
+const UNAVAILABLE_TOOL_RECOVERY_PROMPT =
+    process.env.FLOWISE_UNAVAILABLE_TOOL_RECOVERY_PROMPT ||
+    'You requested a tool that is not available in this flow. Do not call any tool again. Write a concise natural-language answer to the user based on any tool results already available. Do not copy raw JSON — transform it into plain sentences. If no useful tool result exists, answer with the best direct explanation you can.'
+
+type RecoveryReason = 'duplicate' | 'unavailable'
+
+type ClassifiedToolCalls = {
+    validToolCalls: any[]
+    duplicateToolCalls: any[]
+    unavailableToolCalls: any[]
+}
+
+const normalizeToolArgsForSignature = (args: any): any => {
+    if (typeof args !== 'string') return args
+
+    try {
+        return JSON.parse(args)
+    } catch {
+        return args
+    }
+}
+
+const toolCallSignature = (toolCall: any): string => {
+    const args = normalizeToolArgsForSignature(toolCall?.args ?? {})
+    const normalizedArgs = typeof args === 'string' ? args : stableStringify(args)
+    return `${toolCall?.name || 'tool'}::${normalizedArgs}`
+}
+
+const getCurrentTurnToolCallSignatures = (messages: BaseMessageLike[]): Set<string> => {
+    const signatures = new Set<string>()
+    let startIndex = 0
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i] as any
+        if (message?.role === 'user') {
+            startIndex = i + 1
+            break
+        }
+    }
+
+    for (const message of (messages as any[]).slice(startIndex)) {
+        if (!message || !Array.isArray(message.tool_calls)) continue
+        for (const toolCall of message.tool_calls) {
+            signatures.add(toolCallSignature(toolCall))
+        }
+    }
+    return signatures
+}
+
+const extractResponseText = (content: any): string => {
+    if (typeof content === 'string') return content
+
+    if (Array.isArray(content)) {
+        return content
+            .map((item: any) => {
+                if ((item?.text && !item?.type) || item?.type === 'text') {
+                    return item.text || ''
+                }
+                return ''
+            })
+            .filter((text: string) => text)
+            .join('\n')
+    }
+
+    return ''
+}
+
 class Agent_Agentflow implements INode {
     label: string
     name: string
@@ -1208,6 +1298,7 @@ class Agent_Agentflow implements INode {
                     options,
                     abortController,
                     llmNodeInstance,
+                    llmWithoutToolsBind,
                     isStreamable,
                     isLastNode,
                     iterationContext,
@@ -2137,6 +2228,103 @@ class Agent_Agentflow implements INode {
         sseStreamer.streamEndEvent(chatId)
     }
 
+    private classifyToolCalls(response: AIMessageChunk, messages: BaseMessageLike[], toolsInstance: Tool[]): ClassifiedToolCalls {
+        const existingToolCallSignatures = getCurrentTurnToolCallSignatures(messages)
+        const validToolCalls: any[] = []
+        const duplicateToolCalls: any[] = []
+        const unavailableToolCalls: any[] = []
+
+        for (const toolCall of response.tool_calls ?? []) {
+            const signature = toolCallSignature(toolCall)
+            const selectedTool = toolsInstance.find((tool) => tool.name === toolCall.name)
+
+            if (existingToolCallSignatures.has(signature)) {
+                duplicateToolCalls.push(toolCall)
+                continue
+            }
+
+            if (!selectedTool) {
+                unavailableToolCalls.push(toolCall)
+                continue
+            }
+
+            validToolCalls.push(toolCall)
+        }
+
+        return { validToolCalls, duplicateToolCalls, unavailableToolCalls }
+    }
+
+    private async recoverFinalAnswerFromContext({
+        messages,
+        llmWithoutToolsBind,
+        abortController,
+        chatId,
+        sseStreamer,
+        isLastNode,
+        isStructuredOutput,
+        reason
+    }: {
+        messages: BaseMessageLike[]
+        llmWithoutToolsBind: BaseChatModel
+        abortController: AbortController
+        chatId: string
+        sseStreamer: IServerSideEventStreamer | undefined
+        isLastNode: boolean
+        isStructuredOutput: boolean
+        reason: RecoveryReason
+    }): Promise<AIMessageChunk> {
+        const recoveryPrompt = reason === 'duplicate' ? DUPLICATE_TOOL_RECOVERY_PROMPT : UNAVAILABLE_TOOL_RECOVERY_PROMPT
+        let latestUserContent = ''
+        const toolOutputs: string[] = []
+
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const message = messages[i] as any
+            if (!latestUserContent && message?.role === 'user' && message?.content) {
+                latestUserContent =
+                    typeof message.content === 'string' ? message.content : extractResponseText(message.content) || JSON.stringify(message.content)
+            }
+
+            if (message?.role === 'tool' && message?.content) {
+                const toolContent =
+                    typeof message.content === 'string' ? message.content : extractResponseText(message.content) || JSON.stringify(message.content)
+                if (toolContent) {
+                    toolOutputs.unshift(toolContent)
+                }
+            }
+        }
+
+        const recoveryMessages: BaseMessageLike[] = [
+            { role: 'system', content: recoveryPrompt },
+            {
+                role: 'user',
+                content: `Original user request:\n${latestUserContent || 'No user request provided.'}\n\nTool results:\n${
+                    toolOutputs.join('\n\n') || 'No tool results were available.'
+                }`
+            }
+        ]
+        const finalResponse = await llmWithoutToolsBind.invoke(recoveryMessages, { signal: abortController?.signal })
+        let responseContent = extractResponseText(finalResponse.content)
+
+        if (!responseContent) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const message = messages[i] as any
+                if (message?.role === 'tool' && message?.content) {
+                    responseContent = typeof message.content === 'string' ? message.content : extractResponseText(message.content)
+                    if (responseContent) break
+                }
+            }
+        }
+
+        finalResponse.content = responseContent
+        ;(finalResponse as any).tool_calls = undefined
+
+        if (isLastNode && sseStreamer && !isStructuredOutput) {
+            sseStreamer.streamTokenEvent(chatId, responseContent || JSON.stringify(finalResponse, null, 2))
+        }
+
+        return finalResponse
+    }
+
     /**
      * Handles tool calls and their responses, with support for recursive tool calling
      */
@@ -2150,6 +2338,7 @@ class Agent_Agentflow implements INode {
         options,
         abortController,
         llmNodeInstance,
+        llmWithoutToolsBind,
         isStreamable,
         isLastNode,
         iterationContext,
@@ -2166,6 +2355,7 @@ class Agent_Agentflow implements INode {
         options: ICommonObject
         abortController: AbortController
         llmNodeInstance: BaseChatModel
+        llmWithoutToolsBind: BaseChatModel
         isStreamable: boolean
         isLastNode: boolean
         iterationContext: ICommonObject
@@ -2204,9 +2394,18 @@ class Agent_Agentflow implements INode {
             }
         }
 
+        const { validToolCalls, duplicateToolCalls, unavailableToolCalls } = this.classifyToolCalls(response, messages, toolsInstance)
+        const hasDuplicateToolCalls = duplicateToolCalls.length > 0
+        const hasUnavailableToolCalls = unavailableToolCalls.length > 0
+        const filteredResponse = new AIMessageChunk({
+            ...response,
+            tool_calls: validToolCalls
+        })
+        const filteredToolCalls = filteredResponse.tool_calls ?? []
+
         // Stream tool calls if available
-        if (sseStreamer) {
-            const formattedToolCalls = response.tool_calls.map((toolCall: any) => ({
+        if (sseStreamer && filteredToolCalls.length > 0) {
+            const formattedToolCalls = filteredToolCalls.map((toolCall: any) => ({
                 tool: toolCall.name || 'tool',
                 toolInput: toolCall.args,
                 toolOutput: ''
@@ -2216,34 +2415,36 @@ class Agent_Agentflow implements INode {
 
         // Remove tool calls with no id
         const toBeRemovedToolCalls = []
-        for (let i = 0; i < response.tool_calls.length; i++) {
-            const toolCall = response.tool_calls[i]
+        for (let i = 0; i < filteredToolCalls.length; i++) {
+            const toolCall = filteredToolCalls[i]
             if (!toolCall.id) {
                 toBeRemovedToolCalls.push(toolCall)
                 usedTools.push({
                     tool: toolCall.name || 'tool',
                     toolInput: toolCall.args,
-                    toolOutput: response.content
+                    toolOutput: filteredResponse.content
                 })
             }
         }
 
         for (const toolCall of toBeRemovedToolCalls) {
-            response.tool_calls.splice(response.tool_calls.indexOf(toolCall), 1)
+            filteredToolCalls.splice(filteredToolCalls.indexOf(toolCall), 1)
         }
 
         // Add LLM response with tool calls to messages
-        messages.push({
-            id: response.id,
-            role: 'assistant',
-            content: response.content,
-            tool_calls: response.tool_calls,
-            usage_metadata: response.usage_metadata
-        })
+        if (filteredToolCalls.length > 0) {
+            messages.push({
+                id: filteredResponse.id,
+                role: 'assistant',
+                content: filteredResponse.content,
+                tool_calls: filteredToolCalls,
+                usage_metadata: filteredResponse.usage_metadata
+            })
+        }
 
         // Process each tool call
-        for (let i = 0; i < response.tool_calls.length; i++) {
-            const toolCall = response.tool_calls[i]
+        for (let i = 0; i < filteredToolCalls.length; i++) {
+            const toolCall = filteredToolCalls[i]
 
             const selectedTool = toolsInstance.find((tool) => tool.name === toolCall.name)
             if (selectedTool) {
@@ -2375,8 +2576,8 @@ class Agent_Agentflow implements INode {
         }
 
         // Return direct tool output if there's exactly one tool with returnDirect
-        if (response.tool_calls.length === 1) {
-            const selectedTool = toolsInstance.find((tool) => tool.name === response.tool_calls?.[0]?.name)
+        if (filteredToolCalls.length === 1) {
+            const selectedTool = toolsInstance.find((tool) => tool.name === filteredToolCalls[0]?.name)
             if (selectedTool && selectedTool.returnDirect) {
                 const lastToolOutput = usedTools[0]?.toolOutput || ''
                 const lastToolOutputString = typeof lastToolOutput === 'string' ? lastToolOutput : JSON.stringify(lastToolOutput, null, 2)
@@ -2397,14 +2598,24 @@ class Agent_Agentflow implements INode {
             }
         }
 
-        if (response.tool_calls.length === 0) {
-            const responseContent = extractResponseContent(response)
+        if (filteredToolCalls.length === 0) {
+            const recoveryReason: RecoveryReason = hasUnavailableToolCalls ? 'unavailable' : 'duplicate'
+            const recoveryResponse = await this.recoverFinalAnswerFromContext({
+                messages,
+                llmWithoutToolsBind,
+                abortController,
+                chatId,
+                sseStreamer,
+                isLastNode,
+                isStructuredOutput,
+                reason: recoveryReason
+            })
             return {
-                response: new AIMessageChunk(responseContent),
+                response: recoveryResponse,
                 usedTools,
                 sourceDocuments,
                 artifacts,
-                totalTokens,
+                totalTokens: totalTokens + (recoveryResponse.usage_metadata?.total_tokens || 0),
                 accumulatedReasonContent: accumulatedReasonContent || undefined,
                 accumulatedReasoningDuration: accumulatedReasoningDuration || undefined
             }
@@ -2446,6 +2657,29 @@ class Agent_Agentflow implements INode {
             accumulatedReasoningDuration += newResponse.additional_kwargs.reasoning_duration
         }
 
+        if (hasDuplicateToolCalls || hasUnavailableToolCalls) {
+            const recoveryReason: RecoveryReason = hasUnavailableToolCalls ? 'unavailable' : 'duplicate'
+            const recoveryResponse = await this.recoverFinalAnswerFromContext({
+                messages,
+                llmWithoutToolsBind,
+                abortController,
+                chatId,
+                sseStreamer,
+                isLastNode,
+                isStructuredOutput,
+                reason: recoveryReason
+            })
+            return {
+                response: recoveryResponse,
+                usedTools,
+                sourceDocuments,
+                artifacts,
+                totalTokens: totalTokens + (recoveryResponse.usage_metadata?.total_tokens || 0),
+                accumulatedReasonContent: accumulatedReasonContent || undefined,
+                accumulatedReasoningDuration: accumulatedReasoningDuration || undefined
+            }
+        }
+
         // Check for recursive tool calls and handle them
         if (newResponse.tool_calls && newResponse.tool_calls.length > 0) {
             const {
@@ -2467,6 +2701,7 @@ class Agent_Agentflow implements INode {
                 options,
                 abortController,
                 llmNodeInstance,
+                llmWithoutToolsBind,
                 isStreamable,
                 isLastNode,
                 iterationContext,
@@ -2852,6 +3087,7 @@ class Agent_Agentflow implements INode {
                 options,
                 abortController,
                 llmNodeInstance,
+                llmWithoutToolsBind,
                 isStreamable,
                 isLastNode,
                 iterationContext,

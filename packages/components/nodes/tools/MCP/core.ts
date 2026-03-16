@@ -7,6 +7,49 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { checkDenyList, secureFetch } from '../../../src/httpSecurity'
 
+const MCP_TOOL_TIMEOUT_MS = process.env.MCP_TOOL_TIMEOUT_MS ? parseInt(process.env.MCP_TOOL_TIMEOUT_MS, 10) : 1800000 // 30m
+const MCP_TRANSPORT_TIMEOUT_MS = process.env.MCP_TRANSPORT_TIMEOUT_MS
+    ? parseInt(process.env.MCP_TRANSPORT_TIMEOUT_MS, 10)
+    : MCP_TOOL_TIMEOUT_MS + 60000 // keep transport slightly above tool timeout
+
+// Undici (Node.js 18+ built-in fetch backend) has a default headersTimeout + bodyTimeout
+// of 300s that fires independently of AbortSignal, breaking long-running MCP tool calls.
+// We create a dedicated Agent with timeouts aligned to MCP_TRANSPORT_TIMEOUT_MS.
+let mcpUndiciAgent: any = undefined
+try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // new Function avoids TS "require not found" while still capturing CJS module-scoped require
+    // eslint-disable-next-line no-new-func
+    const undici = new Function('return require')()('undici')
+    mcpUndiciAgent = new undici.Agent({
+        headersTimeout: MCP_TRANSPORT_TIMEOUT_MS,
+        bodyTimeout: MCP_TRANSPORT_TIMEOUT_MS,
+        connectTimeout: 10_000
+    })
+} catch (_) {
+    // undici not available — fall back to default fetch behaviour
+}
+
+const getTimeoutSignal = (timeoutMs: number): AbortSignal | undefined => {
+    const abortSignalFactory = (globalThis as any)?.AbortSignal
+    if (!abortSignalFactory || typeof abortSignalFactory.timeout !== 'function') {
+        return undefined
+    }
+    return abortSignalFactory.timeout(timeoutMs) as AbortSignal
+}
+
+const buildRequestInit = (headers?: Record<string, string>): RequestInit => {
+    const requestInit: any = { dispatcher: mcpUndiciAgent }
+    if (headers) {
+        requestInit.headers = headers
+    }
+    const timeoutSignal = getTimeoutSignal(MCP_TRANSPORT_TIMEOUT_MS)
+    if (timeoutSignal) {
+        requestInit.signal = timeoutSignal
+    }
+    return requestInit as RequestInit
+}
+
 const formatMCPToolContent = (content: any): string => {
     if (!Array.isArray(content)) {
         return JSON.stringify(content)
@@ -78,34 +121,33 @@ export class MCPToolkit extends BaseToolkit {
             try {
                 if (this.serverParams.headers) {
                     transport = new StreamableHTTPClientTransport(baseUrl, {
-                        requestInit: {
-                            headers: this.serverParams.headers
-                        }
+                        requestInit: buildRequestInit(this.serverParams.headers)
                     })
                 } else {
-                    transport = new StreamableHTTPClientTransport(baseUrl)
+                    transport = new StreamableHTTPClientTransport(baseUrl, {
+                        requestInit: buildRequestInit()
+                    })
                 }
                 await client.connect(transport)
             } catch (error) {
                 if (this.serverParams.headers) {
                     transport = new SSEClientTransport(baseUrl, {
-                        requestInit: {
-                            headers: this.serverParams.headers
-                        },
+                        requestInit: buildRequestInit(this.serverParams.headers),
                         eventSourceInit: {
                             fetch: async (url, init) => {
                                 return secureFetch(url.toString(), {
-                                    ...(init as any),
-                                    headers: this.serverParams.headers
+                                    ...buildRequestInit(this.serverParams.headers),
+                                    ...(init as any)
                                 }) as any
                             }
                         }
                     })
                 } else {
                     transport = new SSEClientTransport(baseUrl, {
+                        requestInit: buildRequestInit(),
                         eventSourceInit: {
                             fetch: async (url, init) => {
-                                return secureFetch(url.toString(), init as any) as any
+                                return secureFetch(url.toString(), { ...buildRequestInit(), ...(init as any) }) as any
                             }
                         }
                     })
@@ -173,7 +215,7 @@ export async function MCPTool({
 
             try {
                 const req: CallToolRequest = { method: 'tools/call', params: { name: name, arguments: input as any } }
-                const res = await client.request(req, CallToolResultSchema)
+                const res = await client.request(req, CallToolResultSchema, { timeout: MCP_TOOL_TIMEOUT_MS })
                 return formatMCPToolContent(res.content)
             } finally {
                 // Always close the client after the request completes

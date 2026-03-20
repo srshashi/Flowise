@@ -228,6 +228,10 @@ export const resolveVariables = async (
 ): Promise<INodeData> => {
     let flowNodeData = cloneDeep(reactFlowNodeData)
     const types = 'inputs'
+    const runtimeInputParams =
+        reactFlowNodeData.inputParams && reactFlowNodeData.inputParams.length > 0
+            ? reactFlowNodeData.inputParams
+            : componentNodes[reactFlowNodeData.name]?.inputs || []
 
     const resolveNodeReference = async (value: any): Promise<any> => {
         // If value is an array, process each element
@@ -508,7 +512,7 @@ export const resolveVariables = async (
 
         // STEP 1: Get all params with loadConfig from inputParams
         // Example result: ["agentModel", "agentSelectedTool"]
-        const paramsWithLoadConfig = findParamsWithLoadConfig(reactFlowNodeData.inputParams)
+        const paramsWithLoadConfig = findParamsWithLoadConfig(runtimeInputParams)
 
         // STEP 2-6: Process each param with loadConfig
         for (const paramWithLoadConfig of paramsWithLoadConfig) {
@@ -582,7 +586,7 @@ export const resolveVariables = async (
         // Example: Direct params like agentUserMessage with acceptVariable: true
         for (const key in paramsObj) {
             const paramValue = paramsObj[key]
-            const isAcceptVariable = reactFlowNodeData.inputParams.find((param) => param.name === key)?.acceptVariable ?? false
+            const isAcceptVariable = runtimeInputParams.find((param) => param.name === key)?.acceptVariable ?? false
             if (isAcceptVariable) {
                 paramsObj[key] = await resolveNodeReference(paramValue)
             }
